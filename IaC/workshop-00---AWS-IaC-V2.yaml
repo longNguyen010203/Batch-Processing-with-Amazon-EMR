@@ -1,0 +1,285 @@
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Setup infrastructure for batch processing with Amazon EMR workshop on Amazon Web Services (AWS)
+
+Parameters:
+  SubnetCidrBlock:
+    Description: CidrBlock for Subnet
+    Type: CommaDelimitedList
+    Default: "10.10.1.0/24, 10.10.2.0/24, 10.10.3.0/24, 10.10.4.0/24"
+
+  InstanceType:
+    Description: WebServer EC2 instance type (has default, AllowedValues)
+    Type: String
+    Default: m5.xlarge
+    AllowedValues:
+      - m5.2xlarge
+      - m5.xlarge
+    ConstraintDescription: must be a valid EC2 instance type.
+
+  ReleaseLabel:
+    Description: A release contains a set of applications which can be installed on your cluster.
+    Type: String
+    Default: emr-7.2.0
+    AllowedValues:
+      - emr-7.2.0
+      - emr-7.1.0
+      - emr-7.0.0
+      - emr-6.12.0
+      - emr-6.13.0
+      - emr-6.14.0
+      - emr-6.15.0
+    ConstraintDescription: ReleaseLabel is invalid
+
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instances. Linked to AWS Parameter
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: must be the name of an existing EC2 KeyPair.
+
+  MinimumCapacityUnits:
+    Description: |
+      The lower boundary of Amazon EC2 units. It is measured through vCPU cores or 
+      instances for instance groups and measured through units for instance fleets. 
+      Managed scaling activities are not allowed beyond this boundary. 
+      The limit only applies to the core and task nodes. 
+      The master node cannot be scaled after initial configuration.
+    Type: String
+    Default: 2
+
+  MaximumCapacityUnits:
+    Description: |
+      The upper boundary of Amazon EC2 units. It is measured through vCPU cores or instances for instance groups 
+      and measured through units for instance fleets. Managed scaling activities are not allowed beyond this boundary. 
+      The limit only applies to the core and task nodes. The master node cannot be scaled after initial configuration.
+    Type: String
+    Default: 8
+
+  MaximumCoreCapacityUnits:
+    Description: |
+      The upper boundary of Amazon EC2 units for core node type in a cluster. 
+      It is measured through vCPU cores or instances for instance groups and measured through units for instance fleets. 
+      The core units are not allowed to scale beyond this boundary. The parameter is used to split capacity allocation between core and task nodes.
+    Type: String
+    Default: 3
+
+  MaximumOnDemandCapacityUnits:
+    Description: |
+      The upper boundary of On-Demand Amazon EC2 units. It is measured through vCPU cores or instances for instance groups and measured through units for instance fleets. 
+      The On-Demand units are not allowed to scale beyond this boundary. The parameter is used to split capacity allocation between On-Demand and Spot Instances.
+    Type: String
+    Default: 5
+
+  UnitType:
+    Description: The unit type used for specifying a managed scaling policy.
+    Type: String
+    Default: Instances
+    ConstraintDescription: is invalid
+
+Resources:
+  # Amazon S3
+  s3:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: online-retail-ecommerce
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: name
+          Value: Online Retail Ecommerce
+
+  # Amazon VPC
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.10.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      InstanceTenancy: default
+      Tags:
+        - Key: name
+          Value: Retail Vpc
+
+  # Public Subnet
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: ap-southeast-1a
+      CidrBlock: !Select [0, !Ref SubnetCidrBlock]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: name
+          Value: Public Subnet 1
+
+  # S3 Gateway Endpoint
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Gateway
+      ServiceName: !Sub com.amazonaws.ap-southeast-1.s3
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: Allow-access-to-specific-bucket
+            Effect: Allow
+            Principal: '*'
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:ListBucket
+            Resource:
+              - arn:aws:s3:::online-retail-ecommerce/*
+              - arn:aws:s3:::online-retail-ecommerce
+      RouteTableIds:
+        - !Ref RouteTable
+    DependsOn: s3
+
+  # Internet Gateway
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: Internet Gateway
+
+  # Internet Gateway Attachment
+  VpcGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  # Route Table
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: name
+          Value: Route Table Public
+
+  # Route Table Subnet Associate
+  RouteTableSubnetAssociate1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  # Route
+  Route:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+    DependsOn: VpcGatewayAttachment
+
+  # EMR Cluster
+  Emr:
+    Type: AWS::EMR::Cluster
+    Properties:
+      Name: emr-retail-cluster
+      ReleaseLabel: !Ref ReleaseLabel
+      Applications:
+        - Name: Spark
+        - Name: Livy
+        - Name: Hadoop
+        - Name: JupyterEnterpriseGateway
+        - Name: Hive
+      Instances:
+        MasterInstanceGroup:
+          InstanceCount: 1
+          InstanceType: !Ref InstanceType
+          Market: ON_DEMAND
+          Name: Primary
+        CoreInstanceGroup:
+          InstanceCount: 1
+          InstanceType: !Ref InstanceType
+          Market: ON_DEMAND
+          Name: Core
+        TaskInstanceGroups:
+          - InstanceCount: 1
+            InstanceType: !Ref InstanceType
+            Market: ON_DEMAND
+            Name: Task-1
+          - InstanceCount: 1
+            InstanceType: !Ref InstanceType
+            Market: ON_DEMAND
+            Name: Task-2
+        Ec2SubnetId: !Ref PublicSubnet1
+        Ec2KeyName: !Ref KeyName
+        AdditionalMasterSecurityGroups:
+          - !Ref EmrSG
+      ServiceRole: EMR_DefaultRole
+      JobFlowRole: EMR_EC2_DefaultRole
+      VisibleToAllUsers: true
+      LogUri: s3://online-retail-ecommerce/logs/
+      ManagedScalingPolicy:
+        ComputeLimits:
+          MinimumCapacityUnits: !Ref MinimumCapacityUnits
+          MaximumCapacityUnits: !Ref MaximumCapacityUnits
+          MaximumCoreCapacityUnits: !Ref MaximumCoreCapacityUnits
+          MaximumOnDemandCapacityUnits: !Ref MaximumOnDemandCapacityUnits
+          UnitType: !Ref UnitType
+      # SecurityConfiguration: 
+      Tags:
+        - Key: name
+          Value: emr retail cluster
+
+  # Emr Security Group
+  EmrSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref Vpc
+      GroupName: Emr Cluster - SG
+      GroupDescription: Allow SSH and Ping for servers in the Emr Cluster
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: name
+          Value: Emr Cluster SG
+  
+  emrRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2008-10-17
+        Statement:
+          - Sid: ''
+            Effect: Allow
+            Principal:
+              Service: !Ref ElasticMapReducePrincipal
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonElasticMapReduceRole
+
+  emrEc2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2008-10-17
+        Statement:
+          - Sid: ''
+            Effect: Allow
+            Principal:
+              Service: !Ref Ec2Principal
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonElasticMapReduceforEC2Role
+
+  emrEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref emrEc2Role
